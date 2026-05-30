@@ -429,6 +429,75 @@ def generate_ai_image(prompt: str, style: Dict[str, Any], dimensions: List[int])
         "prompt_used": prompt
     }, ensure_ascii=False, indent=2)
 
+@mcp.tool()
+def optimize_site_seo_and_virality(site_path: str, keywords: List[str], business_name: str) -> str:
+    """
+    Varre um diretório de site, analisa SEO/virabilidade e injeta tags e JSON-LD estruturado de forma automatizada.
+    """
+    path = Path(site_path).resolve()
+    if not path.exists():
+        return json.dumps({"error": f"Caminho não encontrado: {site_path}"})
+        
+    html_files = list(path.glob("**/*.html"))
+    results = []
+    
+    # Generate generic structured data schema for the business
+    schema = {
+        "@context": "https://schema.org",
+        "@type": "LocalBusiness",
+        "name": business_name,
+        "url": f"https://{business_name.lower().replace(' ', '')}.com.br",
+        "logo": f"https://{business_name.lower().replace(' ', '')}.com.br/logo.png",
+        "description": f"Site otimizado do {business_name} com melhores práticas de SEO e conversão viral.",
+        "currenciesAccepted": "BRL",
+        "paymentAccepted": "Cash, Credit Card"
+    }
+    schema_str = f'\n<script type="application/ld+json">\n{json.dumps(schema, indent=2, ensure_ascii=False)}\n</script>\n'
+    
+    for h_file in html_files:
+        content = h_file.read_text(encoding="utf-8")
+        
+        # Analyze and insert metadata if missing
+        changed = False
+        audit = {
+            "file": h_file.name,
+            "has_h1": "<h1>" in content,
+            "has_description": 'name="description"' in content,
+            "has_og": 'property="og:' in content,
+            "has_schema": 'type="application/ld+json"' in content
+        }
+        
+        # Simple injection logic
+        if not audit["has_schema"] and "</head>" in content:
+            content = content.replace("</head>", f"{schema_str}</head>")
+            changed = True
+            audit["has_schema"] = True
+            
+        if not audit["has_og"] and "</head>" in content:
+            og_meta = (
+                f'\n    <meta property="og:title" content="{business_name}" />\n'
+                f'    <meta property="og:description" content="Saiba mais sobre {business_name}!" />\n'
+                f'    <meta property="og:type" content="website" />\n'
+            )
+            content = content.replace("</head>", f"{og_meta}</head>")
+            changed = True
+            audit["has_og"] = True
+            
+        if changed:
+            h_file.write_text(content, encoding="utf-8")
+            audit["action"] = "updated"
+        else:
+            audit["action"] = "inspected"
+            
+        results.append(audit)
+        
+    return json.dumps({
+        "status": "success",
+        "business_name": business_name,
+        "files_analyzed": len(html_files),
+        "audit_results": results
+    }, ensure_ascii=False, indent=2)
+
 # --- SECTION 0: CLÁUSULA DE ISOLAMENTO DE TOKENS TOOLS ---
 
 @mcp.tool()
