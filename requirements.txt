@@ -1,4 +1,6 @@
 fastmcp==0.1.0
 pydantic>=2.0.0,<3.0.0
-litellm==0.1.0
-uv==0.1.0
+litellm>=1.0.0
+uv
+duckduckgo-search>=5.0.0
+Pillow

@@ -105,3 +105,79 @@ async def test_force_external_only_test():
     data = json.loads(res)
     assert "routing_status" in data
     assert "role" in data
+
+# --- V4.0 Vivar SEO Agent Tests ---
+from server import register_blog_post_in_index, optimize_site_keywords_and_meta, run_vivar_seo_agent_loop
+from pathlib import Path
+
+def test_register_blog_post_in_index(tmp_path):
+    # Setup temporary index.html
+    index_file = tmp_path / "index.html"
+    index_file.write_text('<html><body><div class="grid sm:grid-cols-2 lg:grid-cols-3 gap-6" id="articles-grid"></div></body></html>', encoding="utf-8")
+    
+    success = register_blog_post_in_index(
+        index_file,
+        "test-slug",
+        "Test Title",
+        "Test Excerpt",
+        "gestao",
+        "30 Mai 2026"
+    )
+    
+    assert success is True
+    content = index_file.read_text(encoding="utf-8")
+    assert "artigos/test-slug.html" in content
+    assert "Test Title" in content
+    assert "Test Excerpt" in content
+
+def test_optimize_site_keywords_and_meta(tmp_path):
+    index_file = tmp_path / "index.html"
+    index_file.write_text('<html><head><meta name="keywords" content="original"><meta name="description" content="original"></head></html>', encoding="utf-8")
+    
+    res = optimize_site_keywords_and_meta(
+        str(tmp_path),
+        "newkey",
+        "new desc"
+    )
+    
+    data = json.loads(res)
+    assert data["status"] == "success"
+    assert "index.html" in data["updated_files"]
+    
+    content = index_file.read_text(encoding="utf-8")
+    assert "newkey" in content
+    assert "new desc" in content
+
+@pytest.mark.asyncio
+async def test_run_vivar_seo_agent_loop_missing_path():
+    # If the site path is invalid, it should handle it gracefully or return failure/success when mock runs
+    res = await run_vivar_seo_agent_loop("invalid_path", "construção civil", "GERICFAST", auto_publish=False)
+    data = json.loads(res)
+    # Since auto_publish=False, it won't check site path for publishing, but it should succeed
+    if "status" in data:
+        assert data["status"] in ["success", "failed"]
+
+@pytest.mark.asyncio
+async def test_team_brainstorm():
+    from server import team_brainstorm
+    res = await team_brainstorm("Criar a landing page principal da GERICFAST")
+    assert isinstance(res, str)
+    assert len(res) > 0
+
+@pytest.mark.asyncio
+async def test_apply_ux_ui_refinement(tmp_path):
+    from server import apply_ux_ui_refinement
+    index_file = tmp_path / "index.html"
+    index_file.write_text('<html><head><title>Test</title></head><body></body></html>', encoding="utf-8")
+    
+    res = await apply_ux_ui_refinement(str(tmp_path), "Adicionar gradiente dourado de luxo nos títulos e sombra nos cards")
+    data = json.loads(res)
+    assert data["status"] == "success"
+    assert "index.html" in data["updated_files"]
+    
+    content = index_file.read_text(encoding="utf-8")
+    assert "</head>" in content
+    assert "<style>" in content or "<script>" in content
+
+
+

@@ -9,6 +9,10 @@ from pydantic import BaseModel, Field
 import litellm
 from dotenv import load_dotenv
 from PIL import Image, ImageDraw, ImageFont
+from duckduckgo_search import DDGS
+import datetime
+import shutil
+import re
 
 # Load env variables
 load_dotenv()
@@ -429,6 +433,241 @@ def generate_ai_image(prompt: str, style: Dict[str, Any], dimensions: List[int])
         "prompt_used": prompt
     }, ensure_ascii=False, indent=2)
 
+# --- NEW V4.0 CONTENT MACHINE TOOLS (BLOG & NOTICIAS) ---
+
+@mcp.tool()
+def fetch_trends_and_news(topic: str, max_results: int = 5) -> str:
+    """
+    Busca notícias recentes e tendências sobre o tópico usando DuckDuckGo.
+    """
+    try:
+        results = []
+        with DDGS() as ddgs:
+            news_results = list(ddgs.news(topic, region="br-pt", safesearch="moderate", timelimit="w", max_results=max_results))
+            for item in news_results:
+                results.append({
+                    "title": item.get("title", ""),
+                    "snippet": item.get("body", ""),
+                    "url": item.get("url", ""),
+                    "source": item.get("source", ""),
+                    "date": item.get("date", "")
+                })
+        return json.dumps({
+            "topic": topic,
+            "status": "success",
+            "news": results
+        }, ensure_ascii=False, indent=2)
+    except Exception as e:
+        logger.error(f"Error fetching news: {e}")
+        return json.dumps({"error": str(e)})
+
+@mcp.tool()
+async def write_content(content_type: str, topic_or_data: str) -> str:
+    """
+    Escreve artigos para o blog ou reescreve notícias no estilo Douglas Adams e regras GERICFAST.
+    """
+    gericfast_rules = (
+        "REGRAS INEGOCIÁVEIS DA GERICFAST:\n"
+        "- Nunca fale mal de alavancagem inteligente, financiamentos estruturados ou funding.\n"
+        "- Posicione bancos tradicionais de varejo como vilões lentos e burocráticos (18 meses de espera).\n"
+        "- Destaque o acesso 'off-market', a alavancagem de até 5x, e a rapidez (30 dias úteis).\n"
+    )
+    
+    if content_type == "noticia":
+        prompt = (
+            "Você é o Redator-Chefe da GERICFAST, escrevendo com o humor ácido, inteligente, "
+            "um pouco cínico e visceral (estilo Douglas Adams).\n"
+            "Sua tarefa é reescrever os dados crus de notícias abaixo e transformar em um post de Noticiário envolvente.\n"
+            f"{gericfast_rules}\n"
+            f"DADOS DA NOTÍCIA:\n{topic_or_data}\n\n"
+            "Escreva o HTML do artigo (usando tags semânticas, sem a estrutura base <html>, apenas o conteúdo do <body> "
+            "com <h1>, <h2>, <p>, <blockquote>). Inclua um CTA final para a Sessão de Viabilidade da GERICFAST."
+        )
+    else:
+        # Blog
+        prompt = (
+            "Você é o Redator-Chefe da GERICFAST. Escreva no estilo Douglas Adams (ácido, inteligente e focado na 'realidade do canteiro de obras').\n"
+            "Sua tarefa é escrever um artigo reflexivo sobre dores e desejos do dono de construtora.\n"
+            f"{gericfast_rules}\n"
+            f"TÓPICO:\n{topic_or_data}\n\n"
+            "Escreva o HTML do artigo (apenas o conteúdo do miolo do post, com <h1>, <h2>, <p>). "
+            "Inclua um CTA final magnético para agendar a Sessão de Viabilidade."
+        )
+
+    # Allow more tokens for this task
+    TOKEN_TRACKER["host_tokens_used"] += 500
+    
+    html_content = await call_llm([{"role": "user", "content": prompt}], temp=0.8)
+    
+    # Strip markdown codeblocks if LLM returned them
+    html_content = re.sub(r'^```html\n|```$', '', html_content.strip(), flags=re.MULTILINE)
+    
+    return json.dumps({
+        "type": content_type,
+        "html_generated": html_content
+    }, ensure_ascii=False, indent=2)
+
+@mcp.tool()
+def stage_for_approval(title: str, html_content: str, content_type: str) -> str:
+    """
+    Salva o HTML gerado em uma pasta de rascunhos para posterior aprovação manual.
+    """
+    # Base paths
+    gericfast_dir = Path("C:/Users/User/.gemini/antigravity-ide/scratch/Gericfast")
+    drafts_dir = gericfast_dir / "blog" / "rascunhos"
+    drafts_dir.mkdir(parents=True, exist_ok=True)
+    
+    # Generate filename
+    safe_title = re.sub(r'[^a-z0-9]+', '-', title.lower()).strip('-')
+    timestamp = datetime.datetime.now().strftime("%Y%m%d_%H%M%S")
+    filename = f"{content_type}_{safe_title}_{timestamp}.html"
+    file_path = drafts_dir / filename
+    
+    # Simple HTML Wrapper for preview
+    full_html = f'''<!DOCTYPE html>
+<html lang="pt-br">
+<head>
+    <meta charset="UTF-8">
+    <title>RASCUNHO: {title}</title>
+    <script src="https://cdn.tailwindcss.com"></script>
+    <style>body {{ background: #041611; color: #e5e7eb; }} .gold-text {{ color: #C5A059; }}</style>
+</head>
+<body class="p-8 max-w-4xl mx-auto">
+    <div class="bg-yellow-900 text-yellow-200 p-4 mb-8 font-bold rounded">
+        STATUS: AGUARDANDO APROVAÇÃO ({content_type.upper()})
+    </div>
+    <div class="prose prose-invert prose-gold max-w-none">
+        {html_content}
+    </div>
+</body>
+</html>'''
+
+    file_path.write_text(full_html, encoding="utf-8")
+    
+    return json.dumps({
+        "status": "staged",
+        "draft_path": str(file_path),
+        "message": f"Rascunho salvo aguardando sua aprovação em: {file_path}"
+    }, ensure_ascii=False, indent=2)
+
+def register_blog_post_in_index(blog_index_path: Path, slug: str, title: str, excerpt: str, category: str, date_str: str, read_time: str = "6 min") -> bool:
+    if not blog_index_path.exists():
+        logger.warning(f"Blog index path not found: {blog_index_path}")
+        return False
+    
+    content = blog_index_path.read_text(encoding="utf-8")
+    
+    # Check if already registered
+    href_str = f'href="artigos/{slug}.html"'
+    if href_str in content:
+        logger.info(f"Article {slug} already registered in index.")
+        return False
+        
+    category_map = {
+        "gestao": {"class": "cat-gestao", "display": "Alavancagem Financeira", "emoji": "🧮"},
+        "guia": {"class": "cat-guia", "display": "Guia do Setor", "emoji": "📖"},
+        "mercado": {"class": "cat-mercado", "display": "Mercado Imobiliário", "emoji": "📈"},
+        "credito": {"class": "cat-credito", "display": "Crédito & Funding", "emoji": "🏦"},
+        "cortar": {"class": "cat-cortar", "display": "Cortar Caminhos", "emoji": "🪤"},
+        "facilitar": {"class": "cat-facilitar", "display": "Facilitar o Trabalho", "emoji": "⚡"},
+        "erros": {"class": "cat-erros", "display": "Erros Comuns", "emoji": "💀"},
+        "dicas": {"class": "cat-dicas", "display": "Dicas Rápidas", "emoji": "💡"}
+    }
+    
+    cat_info = category_map.get(category.lower(), {"class": "cat-gestao", "display": "Alavancagem Financeira", "emoji": "📝"})
+    
+    new_article_html = f'''
+                <!-- ARTIGO AUTOGERADO: {slug} -->
+                <article class="scroll-fade card-glass rounded-xl overflow-hidden" data-category="{category}">
+                    <a href="artigos/{slug}.html" class="block text-decoration-none">
+                        <div class="h-40 bg-gradient-to-br from-gold/20 to-dark flex items-center justify-center">
+                            <span class="text-5xl">{cat_info["emoji"]}</span>
+                        </div>
+                        <div class="p-5">
+                            <span class="category-tag {cat_info["class"]} mb-3 inline-block">{cat_info["display"]}</span>
+                            <h2 class="font-cinzel text-lg font-bold text-white mb-2">{title}</h2>
+                            <p class="text-gray-400 text-sm leading-relaxed mb-3">{excerpt}</p>
+                            <div class="flex items-center justify-between text-gray-600 text-xs">
+                                <span>{date_str}</span>
+                                <span>{read_time}</span>
+                            </div>
+                        </div>
+                    </a>
+                </article>
+'''
+    
+    target_marker = '<div class="grid sm:grid-cols-2 lg:grid-cols-3 gap-6" id="articles-grid">'
+    if target_marker in content:
+        content = content.replace(target_marker, target_marker + new_article_html)
+        blog_index_path.write_text(content, encoding="utf-8")
+        logger.info(f"Successfully injected article {slug} into blog index.")
+        return True
+    else:
+        logger.warning(f"Could not find injection marker in blog index: {target_marker}")
+        return False
+
+@mcp.tool()
+def publish_content(draft_filename: str) -> str:
+    """
+    Aprova um rascunho e move para a pasta pública, deixando o conteúdo pronto para SEO Vivo.
+    """
+    gericfast_dir = Path("C:/Users/User/.gemini/antigravity-ide/scratch/Gericfast")
+    draft_path = gericfast_dir / "blog" / "rascunhos" / draft_filename
+    
+    if not draft_path.exists():
+        return json.dumps({"error": f"Rascunho não encontrado: {draft_path}"})
+        
+    # Determine destination folder (artigos ou noticias)
+    dest_folder = "artigos"
+    if "noticia_" in draft_filename:
+        dest_folder = "noticiario"
+        
+    dest_dir = gericfast_dir / "blog" / dest_folder
+    dest_dir.mkdir(parents=True, exist_ok=True)
+    
+    final_filename = re.sub(r'^(blog|noticia)_', '', draft_filename)
+    final_path = dest_dir / final_filename
+    
+    # Move file
+    shutil.move(str(draft_path), str(final_path))
+    
+    # Update blog index.html if it exists
+    blog_index_path = gericfast_dir / "blog" / "index.html"
+    registered = False
+    if blog_index_path.exists():
+        try:
+            draft_html = final_path.read_text(encoding="utf-8")
+            title_match = re.search(r'<title>(.*?)</title>', draft_html)
+            title = title_match.group(1).replace("RASCUNHO: ", "").strip() if title_match else "Novo Artigo"
+            
+            p_match = re.search(r'<p>(.*?)</p>', draft_html)
+            excerpt = p_match.group(1).strip() if p_match else "Confira as atualizações do setor."
+            excerpt = re.sub('<[^<]+?>', '', excerpt)
+            if len(excerpt) > 150:
+                excerpt = excerpt[:147] + "..."
+                
+            category = "mercado" if dest_folder == "noticiario" else "gestao"
+            # Get clean Portuguese formatted date or similar
+            date_str = datetime.datetime.now().strftime("%d %b %Y")
+            
+            registered = register_blog_post_in_index(
+                blog_index_path,
+                final_filename.replace('.html', ''),
+                title,
+                excerpt,
+                category,
+                date_str
+            )
+        except Exception as e:
+            logger.error(f"Error registering blog post in index: {e}")
+    
+    return json.dumps({
+        "status": "published",
+        "published_path": str(final_path),
+        "registered_in_index": registered,
+        "message": f"Conteúdo publicado com sucesso em {dest_folder} e registrado no índice: {registered}."
+    }, ensure_ascii=False, indent=2)
+
 @mcp.tool()
 def optimize_site_seo_and_virality(site_path: str, keywords: List[str], business_name: str) -> str:
     """
@@ -556,6 +795,182 @@ def validate_token_policy(test_role: str, expected_provider: str = "openrouter")
             "status": "success" if has_any_key else "failed_no_keys"
         },
         "concierge_summary": "✅ Política de tokens validada: o sistema está configurado para usar APENAS APIs externas. Tokens do Antigravity preservados para orquestração e interface." if status == "compliant" else "❌ Violação: Nenhuma chave de API externa configurada."
+    }, ensure_ascii=False, indent=2)
+
+@mcp.tool()
+def optimize_site_keywords_and_meta(site_path: str, keyword: str, description: str) -> str:
+    """
+    Atualiza as meta tags de palavras-chave e descrição de index.html e mobile.html para otimizar SEO.
+    """
+    path = Path(site_path).resolve()
+    if not path.exists():
+        return json.dumps({"error": f"Caminho não encontrado: {site_path}"})
+        
+    html_files = [path / "index.html", path / "mobile.html"]
+    updated_files = []
+    
+    for h_file in html_files:
+        if not h_file.exists():
+            continue
+            
+        content = h_file.read_text(encoding="utf-8")
+        changed = False
+        
+        # 1. Update meta keywords
+        kw_pattern = r'(<meta\s+name="keywords"\s+content=")([^"]*)(")'
+        if re.search(kw_pattern, content):
+            def repl_kw(m):
+                existing = m.group(2)
+                if keyword.lower() not in existing.lower():
+                    new_val = f"{keyword}, {existing}" if existing else keyword
+                    return f"{m.group(1)}{new_val}{m.group(3)}"
+                return m.group(0)
+            content, count = re.subn(kw_pattern, repl_kw, content, flags=re.IGNORECASE)
+            if count > 0:
+                changed = True
+                
+        # 2. Update meta description
+        desc_pattern = r'(<meta\s+name="description"\s+content=")([^"]*)(")'
+        if re.search(desc_pattern, content) and description:
+            content, count = re.subn(desc_pattern, f"\\1{description}\\3", content, flags=re.IGNORECASE)
+            if count > 0:
+                changed = True
+                
+        if changed:
+            h_file.write_text(content, encoding="utf-8")
+            updated_files.append(h_file.name)
+            
+    return json.dumps({
+        "status": "success",
+        "updated_files": updated_files
+    }, ensure_ascii=False, indent=2)
+
+@mcp.tool()
+async def run_vivar_seo_agent_loop(site_path: str, topic: str, business_name: str, auto_publish: bool = True) -> str:
+    """
+    Executa o loop autônomo completo do agente de SEO Vivo (Vivar).
+    Pesquisa tendências, gera um artigo no estilo Douglas Adams (GERICFAST),
+    publica no site (atualizando o index.html do blog) e atualiza metadados.
+    """
+    logger.info(f"Vivar: Buscando tendências para o tópico: {topic}")
+    news_json = fetch_trends_and_news(topic, max_results=3)
+    news_data = json.loads(news_json)
+    
+    if "error" in news_data or not news_data.get("news"):
+        return json.dumps({"status": "failed", "reason": "Nenhuma notícia/tendência encontrada."})
+        
+    raw_text = ""
+    for n in news_data.get('news', []):
+        raw_text += f"- Título: {n['title']}\n  Trecho: {n['snippet']}\n  Fonte: {n['source']} ({n['date']})\n\n"
+        
+    logger.info("Vivar: Gerando artigo de blog...")
+    content_json = await write_content("noticia", raw_text)
+    content_data = json.loads(content_json)
+    html_content = content_data.get("html_generated", "")
+    
+    if not html_content:
+        return json.dumps({"status": "failed", "reason": "Falha ao gerar conteúdo do artigo."})
+        
+    title_prompt = f"Gere um título curto e atraente (máximo 60 caracteres) para este artigo:\n{html_content[:500]}"
+    title = await call_llm([{"role": "user", "content": title_prompt}], temp=0.5)
+    title = title.strip().strip('"').strip("'")
+    
+    logger.info("Vivar: Salvando rascunho...")
+    stage_json = stage_for_approval(title, html_content, "noticia")
+    stage_data = json.loads(stage_json)
+    draft_path = stage_data.get("draft_path")
+    draft_filename = Path(draft_path).name if draft_path else ""
+    
+    publish_data = {}
+    if auto_publish and draft_filename:
+        logger.info("Vivar: Publicando artigo automaticamente...")
+        pub_json = publish_content(draft_filename)
+        publish_data = json.loads(pub_json)
+        
+        excerpt_prompt = f"Gere uma descrição meta de SEO (resumo de 2 frases, máximo 150 caracteres) sobre este título: {title}"
+        excerpt = await call_llm([{"role": "user", "content": excerpt_prompt}], temp=0.5)
+        excerpt = excerpt.strip().strip('"').strip("'")
+        
+        kw_prompt = f"Gere 3 palavras-chave de SEO separadas por vírgula para o título: {title}"
+        kw_str = await call_llm([{"role": "user", "content": kw_prompt}], temp=0.5)
+        kw_str = kw_str.strip().strip('"').strip("'")
+        
+        logger.info("Vivar: Otimizando metadados das páginas do site...")
+        opt_json = optimize_site_keywords_and_meta(site_path, kw_str, excerpt)
+        publish_data["seo_optimization"] = json.loads(opt_json)
+        
+    return json.dumps({
+        "status": "success",
+        "topic": topic,
+        "selected_title": title,
+        "draft_filename": draft_filename,
+        "publish_result": publish_data
+    }, ensure_ascii=False, indent=2)
+
+@mcp.tool()
+async def team_brainstorm(creative_brief: str) -> str:
+    """
+    Simula uma sessão de debate criativo entre Enzo (UX), Valentina (UI), Marley (Estagiário Maconheiro) e um Moderador.
+    """
+    prompt = (
+        "Simule um debate dinâmico, ácido e divertido em português brasileiro sobre o seguinte briefing criativo:\n"
+        f"BRIEFING: {creative_brief}\n\n"
+        "PERSONAGENS E COMPORTAMENTOS EXIGIDOS:\n"
+        "1. Enzo (UX Specialist): Focado estritamente em fluxos, menor atrito, taxas de conversão, usabilidade técnica e simplicidade. É um pouco arrogante, usa jargões em inglês (user flow, framework, drop-off, frictionless) e quer o design o mais limpo e direto possível, sem perfumaria.\n"
+        "2. Valentina (UI Specialist): Focada em estética premium, wow-factor, gradientes dourados, neon, transições fluidas e micro-animações chamativas. Quer impressionar visualmente o usuário, fazer com que pareça luxuoso e exclusivo, mesmo que adicione peso ou complexidade visual.\n"
+        "3. Marley (Estagiário Maconheiro): Dá palpites bizarros, brisas filosóficas profundas que só alguém muito chapado e sob efeito de substâncias criativas teria (ex: 'Mano, e se a gente fizesse o site flutuar na gravidade...', 'Cara, já pensou se as fontes fossem feitas de fumaça digital e mudassem de acordo com o humor do cliente?', 'Mano, e se o botão de contratar fosse um portal interdimensional que suga o usuário pro WhatsApp?'). Seu tom é super calmo, arrastado e amigável.\n"
+        "4. Moderador (Douglas Adams Style): Avalia as ideias de Enzo e Valentina com cinismo e elegância britânica, escuta a viagem louca do Marley e decide se a brisa do estagiário tem algum fundo genial aplicável de forma inteligente no mundo real ou se deve ser descartada com ironia.\n\n"
+        "Escreva o debate no formato de diálogo teatral (Markdown). No final, apresente de forma clara a [DECISÃO FINAL DO GRUPO] detalhando a proposta de layout combinada."
+    )
+    
+    # Allow more tokens for the debate
+    TOKEN_TRACKER["host_tokens_used"] += 400
+    
+    debate_result = await call_llm([{"role": "user", "content": prompt}], temp=0.8)
+    return debate_result
+
+@mcp.tool()
+async def apply_ux_ui_refinement(site_path: str, design_decision: str) -> str:
+    """
+    Coloca Enzo (UX) e Valentina (UI) com a mão na massa.
+    Atualiza index.html e mobile.html injetando estilos premium, melhorias de fluxo,
+    micro-animações e fontes luxuosas conforme a decisão do design.
+    """
+    path = Path(site_path).resolve()
+    if not path.exists():
+        return json.dumps({"error": f"Caminho não encontrado: {site_path}"})
+        
+    html_files = [path / "index.html", path / "mobile.html"]
+    updated_files = []
+    
+    for h_file in html_files:
+        if not h_file.exists():
+            continue
+            
+        content = h_file.read_text(encoding="utf-8")
+        
+        prompt = (
+            "Você é o time Enzo (UX) e Valentina (UI). Vocês vão aplicar refinamentos práticos de código no HTML.\n"
+            f"Decisão de Design a ser aplicada: {design_decision}\n\n"
+            "Gere uma folha de estilos CSS compacta (entre tags <style>) e pequenas tags HTML ou scripts JS de animação "
+            "que melhorem drasticamente a usabilidade (UX) e o apelo visual premium (UI) do site (ex: sombras de card, "
+            "gradientes em fontes, animações de entrada para botões, etc).\n"
+            "Retorne APENAS o bloco de código a ser injetado no <head> do arquivo (ex: <style>...</style> e/ou <script>...</script>). "
+            "Não inclua explicações ou markdown adicionais."
+        )
+        
+        injection_code = await call_llm([{"role": "user", "content": prompt}], temp=0.7)
+        injection_code = re.sub(r'^```(html|css)?\n|```$', '', injection_code.strip(), flags=re.MULTILINE)
+        
+        if "</head>" in content and injection_code:
+            content = content.replace("</head>", f"{injection_code}\n</head>")
+            h_file.write_text(content, encoding="utf-8")
+            updated_files.append(h_file.name)
+            
+    return json.dumps({
+        "status": "success",
+        "applied_decision": design_decision,
+        "updated_files": updated_files
     }, ensure_ascii=False, indent=2)
 
 if __name__ == "__main__":
